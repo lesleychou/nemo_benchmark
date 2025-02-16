@@ -160,14 +160,14 @@ def run_full_test(args):
                     if safety_check(commands):
                         try:
                             # Set the signal handler and a 100-second alarm
-                            signal.signal(signal.SIGALRM, handler)
-                            signal.alarm(100)
+                            # signal.signal(signal.SIGALRM, handler)
+                            # signal.alarm(100)
                             
                             # Try executing the command
                             lg.output(net[machine].cmd(commands))
                             
-                            # Disable the alarm after successful execution
-                            signal.alarm(0)
+                            # # Disable the alarm after successful execution
+                            # signal.alarm(0)
                         except TimeoutError as te:
                             lg.output(f"Timeout occurred while executing command on {machine}: {te}")
                         except Exception as e:
@@ -255,15 +255,15 @@ def combined_error_test(args):
                 
                 if safety_check(commands):
                     try:
-                        # Set the signal handler and a 100-second alarm
-                        signal.signal(signal.SIGALRM, handler)
-                        signal.alarm(100)
+                        # # Set the signal handler and a 100-second alarm
+                        # signal.signal(signal.SIGALRM, handler)
+                        # signal.alarm(100)
                         
                         # Try executing the command
                         lg.output(net[machine].cmd(commands))
                         
-                        # Disable the alarm after successful execution
-                        signal.alarm(0)
+                        # # Disable the alarm after successful execution
+                        # signal.alarm(0)
                     except TimeoutError as te:
                         lg.output(f"Timeout occurred while executing command on {machine}: {te}")
                     except Exception as e:
