@@ -13,6 +13,7 @@ load_dotenv()
 import getpass
 from langchain_google_genai import ChatGoogleGenerativeAI
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_GEMINI_API_KEY")
+from prompt_agent import BasePromptAgent, FewShot_Basic_PromptAgent, FewShot_Semantic_PromptAgent, ZeroShot_CoT_PromptAgent
 
 if "GOOGLE_API_KEY" not in os.environ:
     os.environ["GOOGLE_API_KEY"] = getpass.getpass("Enter your Google AI API key: ")
@@ -95,35 +96,7 @@ class LLMModel:
             return int(match.group(1))
         return None
 
-    @staticmethod
-    def _generate_prompt(file_content, log_content):
-        """
-        Generates a JSON format prompt for fixing a Mininet network issue.
 
-        Args:
-            file_content (str): The content of the file containing previous actions and feedback.
-            log_content (str): The latest feedback from the Mininet.
-
-        Returns:
-            str: A JSON-formatted string with 'machine' and 'command' keys.
-        """
-        prompt = (
-            """There is a mininet network, but there are some kinds of problems in the router r0, 
-            so it cannot function well and PingAll() fails at some nodes. You need to fix it.
-            I highly recommend you to use some commands to know the information of the router and 
-            the network to know the cause of the problem. But if you think the information is enough 
-            and you know the reason causing the problem, you have to give commands to fix it.
-            You need to give the output in JSON format, which contains the machine and its command.
-            Then I will give you the latest PingAll() feedback from the network, and also your 
-            previous actions to the network and the actions' feedback to let you know more information.
-            """
-            + "Here are the previous actions and their feedbacks:\n"
-            + file_content
-            + "This is the latest feedback from the mininet:\n"
-            + log_content
-            + "Please only give me the JSON format output, with key 'machine' and 'command' and their value. You can only give one command at a time and don't include 'sudo', and you are not allowed to use vtysh command."
-        )
-        return prompt
     
     def _create_model(self):
         """Creates and returns the appropriate model based on the model name."""
@@ -323,42 +296,62 @@ class QwenModel:
         The device for inference.
     """
 
-    def __init__(self, model_name, max_new_tokens, temperature, device):
-        self.model_name = "Qwen/Qwen2.5-72B-Instruct"
-        self.max_new_tokens = max_new_tokens
-        self.temperature = temperature
-        self.device = device
-        self._load_model()
 
-    def _load_model(self):
-        """Load the Qwen model and tokenizer."""
-        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+    def __init__(self, prompt_type="base"):
         import torch
-
-        # Create BitsAndBytesConfig for 4-bit quantization
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
+        from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+        self.prompt_type = prompt_type
+        self.model_name = "Qwen/Qwen2.5-72B-Instruct"
+        self.quantization_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.float16)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
-            trust_remote_code=True,
-            device_map=self.device
+            device_map=self.device,
+            cache_dir="/home/ubuntu"
+        )
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            device_map=self.device,
+            quantization_config=self.quantization_config,
+            cache_dir="/home/ubuntu"
         )
 
-        # Load the Qwen model with 4-bit quantization
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            trust_remote_code=True,
-            device_map=self.device,
-            quantization_config=quantization_config  # Use the quantization config
-        )
+        if prompt_type == "base":
+            self.prompt_agent = BasePromptAgent()
+        elif prompt_type == "few_shot_basic":
+            self.prompt_agent = FewShot_Basic_PromptAgent()
+        elif prompt_type == "few_shot_semantic":
+            self.prompt_agent = FewShot_Semantic_PromptAgent()
+        else:
+            self.prompt_agent = ZeroShot_CoT_PromptAgent()
+        
 
     def predict(self, log_content, file_path, json_path, **kwargs):
         """Generate a response based on the log content and file content."""
 
         with open(file_path, 'r') as f:
             file_content = f.read()
+        connectivitity_status="Here are the previous actions and their feedbacks:\n" + file_content + "This is the latest feedback from the mininet:\n" + log_content +"Please only give me the JSON format output, with key 'machine' and 'command' and their value. You can only give one command at a time and don't include 'sudo', and you are not allowed to use vtysh command."
 
-        # Generate prompt
-        prompt = LLMModel._generate_prompt(file_content, log_content)
+        # Create prompt based on type
+        if self.prompt_type == "few_shot_semantic":
+            prompt = self.prompt_agent.get_few_shot_prompt(connectivitity_status)
+        elif self.prompt_type in ["few_shot_basic"]:
+            prompt = self.prompt_agent.get_few_shot_prompt()
+            input_data = {"input": connectivitity_status}
+        elif self.prompt_type == "cot":
+            prompt = self.prompt_agent.generate_prompt()
+            prompt = PromptTemplate(
+                input_variables=["input"],
+                template=prompt + "Here is some information for you:\n{input}"
+            )
+            input_data = {"input": connectivitity_status}
+        else:
+            prompt = PromptTemplate(
+                input_variables=["input"],
+                template=self.prompt_agent.prompt_prefix + "Here is the connectivity status:\n{input}"
+            )
+            input_data = {"input": connectivitity_status}
 
         start_time = time.time()
 
@@ -757,21 +750,28 @@ class GPTAgentModel:
         The API key for GPT Agent.
     """
 
-    def __init__(self):
-        self._load_model()
-
-    def _load_model(self):
-        """Initialize the GPT Agent client."""
-
-        self.client = AzureChatOpenAI(
-            openai_api_type="azure_ad",
+    def __init__(self, prompt_type="base"):
+        self.llm = AzureChatOpenAI(
             openai_api_version="2024-08-01-preview",
-            deployment_name='gpt-4o',
-            model_name='gpt-4o',
+            deployment_name='ztn-sweden-gpt-4o',
+            model_name='ztn-sweden-gpt-4o',
             temperature=0.0,
             max_tokens=4000,
-            )
-        print("======GPT-4o successfully loaded=======")
+        )
+        self.prompt_type = prompt_type
+        
+        if prompt_type == "base":
+            print("base")
+            self.prompt_agent = BasePromptAgent()
+        elif prompt_type == "cot":
+            print("cot")
+            self.prompt_agent = ZeroShot_CoT_PromptAgent()
+        elif prompt_type == "few_shot_basic":
+            print("few_shot_basic")
+            self.prompt_agent = FewShot_Basic_PromptAgent()
+        elif prompt_type == "few_shot_semantic":
+            print("few_shot_semantic")
+            self.prompt_agent = FewShot_Semantic_PromptAgent()
 
     def predict(self, log_content, file_path, json_path, **kwargs):
         """Generate a response based on the log content and file content."""
